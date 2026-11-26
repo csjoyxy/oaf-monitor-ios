@@ -228,7 +228,7 @@ final class AppStore: ObservableObject {
             async let barkTask = UbusClient.shared.fetchBarkConfig(profile: profile, password: password)
 
             let fetchedDevices = try await devsTask
-            let liveData = (try? await liveTask) ?? ([], [])
+            let liveData = (try? await liveTask) ?? (activeRecords: [], globalTraffic: [])
             let fetchedBark = try? await barkTask
 
             if categoryMap.isEmpty {
