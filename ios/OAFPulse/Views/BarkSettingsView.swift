@@ -41,7 +41,7 @@ struct BarkSettingsView: View {
                         UIPasteboard.general.string = installOneLiner
                         store.showToast("已复制路由器一键安装命令")
                     } onRecheck: {
-                        Task { await store.refreshAll(showSpinner: true) }
+                        Task { await store.recheckBarkAgent() }
                     }
                 }
 

@@ -235,21 +235,52 @@ final class AppStore: ObservableObject {
                 categoryMap = await UbusClient.shared.fetchCategoryMap(profile: profile, password: password)
             }
 
-            self.devices = fetchedDevices
-            self.activeRecords = liveData.activeRecords
-            self.globalHourlyTraffic = liveData.globalTraffic
+            let currentRoute = await UbusClient.shared.currentRoute()
+            AppIconCache.shared.activeBaseURL = currentRoute.activeBaseURL
+            AppIconCache.shared.allowInsecureTLS = profile.allowInsecureTLS
+
+            if self.devices != fetchedDevices {
+                self.devices = fetchedDevices
+            }
+            if self.activeRecords != liveData.activeRecords {
+                self.activeRecords = liveData.activeRecords
+            }
+            if self.globalHourlyTraffic != liveData.globalTraffic {
+                self.globalHourlyTraffic = liveData.globalTraffic
+            }
             if let fetchedBark {
-                self.barkConfig = fetchedBark
-                self.isBarkAgentInstalled = true
-            } else {
+                if self.barkConfig != fetchedBark {
+                    self.barkConfig = fetchedBark
+                }
+                if !self.isBarkAgentInstalled {
+                    self.isBarkAgentInstalled = true
+                }
+            } else if self.isBarkAgentInstalled {
                 self.isBarkAgentInstalled = false
             }
-            self.routeStatus = await UbusClient.shared.currentRoute()
-            self.lastError = nil
+            if self.routeStatus != currentRoute {
+                self.routeStatus = currentRoute
+            }
+            if self.lastError != nil {
+                self.lastError = nil
+            }
             self.lastUpdated = Date()
         } catch {
             self.lastError = error.localizedDescription
             self.routeStatus = .disconnected
+        }
+    }
+
+    func recheckBarkAgent() async {
+        // Force fresh rpcd login so newly added /usr/share/rpcd/acl.d/oaf-bark.json ACLs take effect immediately!
+        await UbusClient.shared.resetSession()
+        await refreshAll(showSpinner: true)
+        if isBarkAgentInstalled {
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            showToast("已成功检测到路由器 Bark 通知组件")
+        } else {
+            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            showToast("仍未检测到 oaf_bark 接口，请重新执行最新安装命令", isError: true)
         }
     }
 

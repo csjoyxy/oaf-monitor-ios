@@ -1,13 +1,14 @@
 #!/bin/sh
-# One-line installer for OAF Pulse Router Bark Agent (OpenWrt + OAF 7.0+)
+# One-line installer for OAF Pulse Router Bark Agent (OpenWrt / LibWrt / ImmortalWrt + OAF 7.0+)
 set -e
 
 REPO_RAW="https://raw.githubusercontent.com/csjoyxy/oaf-monitor-ios/main/router-agent"
+TS="$(date +%s 2>/dev/null || echo 1)"
 
-echo "==> [OAF Pulse] 正在安装超轻量上下线 Bark 通知组件..."
+echo "==> [OAF Pulse] 正在安装/更新超轻量上下线 Bark 通知组件..."
 
 fetch_file() {
-    src="$1"
+    src="$1?t=$TS"
     dst="$2"
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL -m 20 "$src" -o "$dst"
@@ -22,13 +23,12 @@ fetch_file() {
 }
 
 [ -x /usr/bin/lua ] || {
-    echo "错误：未检测到 /usr/bin/lua（OAF 7.0 依赖默认已包含 Lua）。" >&2
+    echo "错误：未检测到 /usr/bin/lua。" >&2
     exit 1
 }
 
 mkdir -p /usr/bin /usr/libexec/rpcd /usr/share/rpcd/acl.d /etc/init.d /etc/config
 
-# Support both local directory install and remote one-liner install
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || echo "")"
 if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/oaf-barkd.lua" ]; then
     cp "$SCRIPT_DIR/oaf-barkd.lua" /usr/bin/oaf-barkd
@@ -63,9 +63,31 @@ config global 'main'
 EOF
 fi
 
-/etc/init.d/rpcd restart >/dev/null 2>&1 || /etc/init.d/rpcd reload >/dev/null 2>&1 || true
+# Self-test rpcd plugin output before restarting rpcd
+if ! /usr/libexec/rpcd/oaf_bark list >/dev/null 2>&1; then
+    echo "错误：/usr/libexec/rpcd/oaf_bark 自检失败：" >&2
+    /usr/libexec/rpcd/oaf_bark list || true
+    exit 1
+fi
+
+/etc/init.d/rpcd restart >/dev/null 2>&1 || {
+    /etc/init.d/rpcd stop >/dev/null 2>&1 || true
+    sleep 1
+    /etc/init.d/rpcd start >/dev/null 2>&1 || true
+}
+sleep 1
+
 /etc/init.d/oaf-bark enable >/dev/null 2>&1 || true
 /etc/init.d/oaf-bark restart >/dev/null 2>&1 || true
 
-echo "==> [OAF Pulse] 安装完成！"
-echo "    现在可以直接打开手机上的 OAF Pulse App ->「提醒与设置」填写 Bark Key 并勾选要提醒的手机。"
+if ubus list oaf_bark >/dev/null 2>&1; then
+    echo "==> [OAF Pulse] ✓ 安装成功，ubus 接口 (oaf_bark) 已注册就绪！"
+    echo "    请打开手机上的 OAF Pulse App ->「提醒与设置」点击「我已安装，重新检测」（或杀掉 App 重进一次以刷新权限会话）。"
+else
+    echo "==> [OAF Pulse] 警告：rpcd 尚未列出 oaf_bark，尝试强制重启 rpcd..."
+    killall -9 rpcd >/dev/null 2>&1 || true
+    /etc/init.d/rpcd start >/dev/null 2>&1 || true
+    sleep 1
+    ubus list oaf_bark
+    echo "==> [OAF Pulse] ✓ ubus 接口 (oaf_bark) 已就绪！"
+fi

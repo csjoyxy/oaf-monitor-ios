@@ -492,17 +492,7 @@ private struct AppStatsSection: View {
                                             .frame(width: 34, alignment: .trailing)
                                     }
 
-                                    GeometryReader { geo in
-                                        ZStack(alignment: .leading) {
-                                            Capsule()
-                                                .fill(Color.primary.opacity(0.06))
-                                                .frame(height: 6)
-                                            Capsule()
-                                                .fill(barColor)
-                                                .frame(width: max(6, geo.size.width * pct), height: 6)
-                                        }
-                                    }
-                                    .frame(height: 6)
+                                    SlimProgressBar(fraction: pct, color: barColor)
                                 }
                                 .opacity(isHighlighted ? 1.0 : 0.4)
                                 .contentShape(Rectangle())
@@ -790,8 +780,8 @@ private struct OnlineOfflineTimelineSection: View {
                 if events.isEmpty {
                     EmptyStateView(
                         icon: "clock.arrow.circlepath",
-                        title: "暂无上下线记录",
-                        subtitle: "设备发生连接或断开事件后会自动记录在此处"
+                        title: "暂无上下线变动记录",
+                        subtitle: "OAF 7.0 仅记录路由器启动后发生的连接/断开事件；若该手机一直保持在线尚未断开过，后续发生断连或重连时会自动出现在此处"
                     )
                 } else {
                     VStack(spacing: 0) {
@@ -806,11 +796,11 @@ private struct OnlineOfflineTimelineSection: View {
                                         Rectangle()
                                             .fill(Color.primary.opacity(0.10))
                                             .frame(width: 1.5)
-                                            .frame(minHeight: 34)
+                                            .frame(minHeight: 36)
                                     }
                                 }
 
-                                VStack(alignment: .leading, spacing: 4) {
+                                VStack(alignment: .leading, spacing: 5) {
                                     HStack {
                                         Text(ev.isOnlineEvent ? "连接上线" : "断开离线")
                                             .font(.subheadline.weight(.semibold))
@@ -821,10 +811,25 @@ private struct OnlineOfflineTimelineSection: View {
                                             .foregroundStyle(.secondary)
                                     }
 
-                                    if !ev.isOnlineEvent && (ev.durationSeconds > 0 || !ev.durationStr.isEmpty) {
-                                        Text("本次持续在线：\(ev.durationStr.isEmpty ? Formatters.duration(ev.durationSeconds) : ev.durationStr)")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
+                                    if !ev.isOnlineEvent {
+                                        let parts: [String] = [
+                                            ev.onlineDurationSeconds > 0 ? "在线 \(Formatters.duration(ev.onlineDurationSeconds))" : nil,
+                                            ev.activeDurationSeconds > 0 ? "活跃 \(Formatters.duration(ev.activeDurationSeconds))" : nil,
+                                            ev.totalBytes > 0 ? "流量 \(Formatters.bytes(ev.totalBytes))" : nil
+                                        ].compactMap { $0 }
+
+                                        if !parts.isEmpty {
+                                            Text(parts.joined(separator: " · "))
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+
+                                        if !ev.recentApps.isEmpty {
+                                            let appNames = ev.recentApps.prefix(4).map(\.name).joined(separator: "、")
+                                            Text("期间访问：\(appNames)")
+                                                .font(.caption2)
+                                                .foregroundStyle(.tertiary)
+                                        }
                                     }
                                 }
                                 .padding(.bottom, idx < events.count - 1 ? 14 : 2)

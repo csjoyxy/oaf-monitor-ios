@@ -1,4 +1,84 @@
 import SwiftUI
+import UIKit
+
+// MARK: - Zero-Jank Synchronous App Icon Cache (With Negative 404 Cache & Deduplication)
+
+@MainActor
+final class AppIconCache {
+    static let shared = AppIconCache()
+
+    var activeBaseURL: String?
+    var allowInsecureTLS: Bool = true
+
+    private let imageCache = NSCache<NSString, UIImage>()
+    private var missingKeys = Set<String>()
+    private var inFlight: [String: Task<UIImage?, Never>] = [:]
+
+    private lazy var insecureSession: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 3.0
+        cfg.httpMaximumConnectionsPerHost = 4
+        return URLSession(configuration: cfg, delegate: InsecureTLSDelegate(allowInsecure: true), delegateQueue: nil)
+    }()
+
+    private lazy var strictSession: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 3.0
+        cfg.httpMaximumConnectionsPerHost = 4
+        return URLSession(configuration: cfg, delegate: InsecureTLSDelegate(allowInsecure: false), delegateQueue: nil)
+    }()
+
+    func lookupSync(appId: Int) -> UIImage? {
+        guard appId > 0, let base = activeBaseURL else { return nil }
+        let key = "\(base)|\(appId)" as NSString
+        return imageCache.object(forKey: key)
+    }
+
+    func isKnownMissing(appId: Int) -> Bool {
+        guard appId > 0, let base = activeBaseURL else { return true }
+        return missingKeys.contains("\(base)|\(appId)")
+    }
+
+    func fetchIfNeeded(appId: Int) async -> UIImage? {
+        guard appId > 0, let base = activeBaseURL else { return nil }
+        let key = "\(base)|\(appId)"
+        if let hit = imageCache.object(forKey: key as NSString) {
+            return hit
+        }
+        if missingKeys.contains(key) {
+            return nil
+        }
+        if let existingTask = inFlight[key] {
+            return await existingTask.value
+        }
+
+        let useInsecure = allowInsecureTLS
+        let session = useInsecure ? insecureSession : strictSession
+        let task = Task<UIImage?, Never> {
+            guard let url = URL(string: "\(base)/luci-static/resources/oaf/app_icons/\(appId).png") else {
+                return nil
+            }
+            guard let (data, resp) = try? await session.data(from: url),
+                  let http = resp as? HTTPURLResponse,
+                  http.statusCode == 200,
+                  let decoded = UIImage(data: data) else {
+                return nil
+            }
+            return decoded
+        }
+
+        inFlight[key] = task
+        let img = await task.value
+        inFlight[key] = nil
+
+        if let img {
+            imageCache.setObject(img, forKey: key as NSString)
+        } else {
+            missingKeys.insert(key)
+        }
+        return img
+    }
+}
 
 // MARK: - Palette & Formatting Utilities
 
@@ -11,14 +91,14 @@ enum OAFTheme {
     static let coralRose = Color(red: 0.94, green: 0.27, blue: 0.37)
 
     static let chartPalette: [Color] = [
-        Color(red: 0.31, green: 0.27, blue: 0.90), // Indigo
-        Color(red: 0.06, green: 0.73, blue: 0.51), // Emerald
-        Color(red: 0.02, green: 0.71, blue: 0.83), // Cyan
-        Color(red: 0.96, green: 0.62, blue: 0.04), // Amber
-        Color(red: 0.93, green: 0.28, blue: 0.60), // Pink
-        Color(red: 0.55, green: 0.36, blue: 0.96), // Violet
-        Color(red: 0.98, green: 0.45, blue: 0.09), // Orange
-        Color(red: 0.23, green: 0.51, blue: 0.96)  // Blue
+        Color(red: 0.31, green: 0.27, blue: 0.90),
+        Color(red: 0.06, green: 0.73, blue: 0.51),
+        Color(red: 0.02, green: 0.71, blue: 0.83),
+        Color(red: 0.96, green: 0.62, blue: 0.04),
+        Color(red: 0.93, green: 0.28, blue: 0.60),
+        Color(red: 0.55, green: 0.36, blue: 0.96),
+        Color(red: 0.98, green: 0.45, blue: 0.09),
+        Color(red: 0.23, green: 0.51, blue: 0.96)
     ]
 
     static func color(at index: Int) -> Color {
@@ -35,6 +115,27 @@ enum OAFTheme {
 }
 
 enum Formatters {
+    private static let todayFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "zh_CN")
+        df.dateFormat = "HH:mm:ss"
+        return df
+    }()
+
+    private static let yesterdayFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "zh_CN")
+        df.dateFormat = "HH:mm"
+        return df
+    }()
+
+    private static let dateTimeFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "zh_CN")
+        df.dateFormat = "MM-dd HH:mm"
+        return df
+    }()
+
     static func duration(_ seconds: Int, compact: Bool = false) -> String {
         guard seconds > 0 else { return compact ? "0m" : "0分钟" }
         if seconds < 60 {
@@ -81,17 +182,12 @@ enum Formatters {
         guard unixSeconds > 0 else { return "--" }
         let date = Date(timeIntervalSince1970: TimeInterval(unixSeconds))
         let cal = Calendar.current
-        let df = DateFormatter()
-        df.locale = Locale(identifier: "zh_CN")
         if cal.isDateInToday(date) {
-            df.dateFormat = "HH:mm:ss"
-            return "今天 " + df.string(from: date)
+            return "今天 " + todayFormatter.string(from: date)
         } else if cal.isDateInYesterday(date) {
-            df.dateFormat = "HH:mm"
-            return "昨天 " + df.string(from: date)
+            return "昨天 " + yesterdayFormatter.string(from: date)
         } else {
-            df.dateFormat = "MM-dd HH:mm"
-            return df.string(from: date)
+            return dateTimeFormatter.string(from: date)
         }
     }
 
@@ -106,7 +202,7 @@ enum Formatters {
     }
 }
 
-// MARK: - Modern Bento Card Container
+// MARK: - GPU-Friendly Bento Card Container (Zero Offscreen Blur Pass!)
 
 struct BentoCard<Content: View>: View {
     var padding: CGFloat = 16
@@ -121,20 +217,17 @@ struct BentoCard<Content: View>: View {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.8)
+                    .strokeBorder(Color.primary.opacity(0.055), lineWidth: 0.6)
             )
-            .shadow(color: Color.black.opacity(0.035), radius: 10, x: 0, y: 4)
     }
 }
 
-// MARK: - Live Breathing Status Dot
+// MARK: - Crisp Zero-Cost Status Indicator Dot
 
 struct PulseStatusDot: View {
     var isOnline: Bool
     var isActive: Bool
     var size: CGFloat = 9
-
-    @State private var animatePulse = false
 
     private var dotColor: Color {
         if !isOnline { return Color.secondary.opacity(0.45) }
@@ -143,24 +236,16 @@ struct PulseStatusDot: View {
 
     var body: some View {
         ZStack {
-            if isActive {
+            if isOnline {
                 Circle()
-                    .fill(dotColor.opacity(0.32))
-                    .frame(width: size * 2.1, height: size * 2.1)
-                    .scaleEffect(animatePulse ? 1.18 : 0.72)
-                    .opacity(animatePulse ? 0.0 : 0.85)
+                    .fill(dotColor.opacity(0.20))
+                    .frame(width: size * 1.85, height: size * 1.85)
             }
             Circle()
                 .fill(dotColor)
                 .frame(width: size, height: size)
         }
-        .frame(width: size * 2.1, height: size * 2.1)
-        .onAppear {
-            guard isActive else { return }
-            withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) {
-                animatePulse = true
-            }
-        }
+        .frame(width: size * 1.85, height: size * 1.85)
     }
 }
 
@@ -214,7 +299,7 @@ struct DeviceAvatarBadge: View {
     }
 }
 
-// MARK: - Smart App Icon Badge (Loads Router PNG Icon + Curated Fallback)
+// MARK: - Smart App Icon Badge (Keyed by appId, Sync Cache Hit, Zero Scroll Lag)
 
 struct AppIconBadge: View {
     let appId: Int
@@ -223,7 +308,8 @@ struct AppIconBadge: View {
     var allowInsecureTLS: Bool = true
     var size: CGFloat = 30
 
-    @State private var remoteImage: UIImage?
+    @State private var loadedForAppId: Int = -1
+    @State private var loadedImage: UIImage?
 
     private var curatedVisual: (symbol: String?, label: String, color: Color) {
         let lower = appName.lowercased()
@@ -248,7 +334,7 @@ struct AppIconBadge: View {
         if lower.contains("王者") || lower.contains("和平精英") || lower.contains("原神") || lower.contains("steam") || lower.contains("游戏") {
             return ("gamecontroller.fill", "游", Color(red: 0.55, green: 0.36, blue: 0.96))
         }
-        if lower.contains("淘宝") || lower.contains("拼多多") || lower.contains("京东") || lower.contains("美团") {
+        if lower.contains("拼多多") || lower.contains("淘宝") || lower.contains("京东") || lower.contains("美团") {
             return ("bag.fill", "购", Color(red: 0.98, green: 0.45, blue: 0.09))
         }
         if lower.contains("音乐") || lower.contains("spotify") || lower.contains("apple music") {
@@ -264,8 +350,11 @@ struct AppIconBadge: View {
     }
 
     var body: some View {
+        let syncCached = allowRemoteIcon ? AppIconCache.shared.lookupSync(appId: appId) : nil
+        let effectiveImage = syncCached ?? (loadedForAppId == appId ? loadedImage : nil)
+
         Group {
-            if let img = remoteImage {
+            if let img = effectiveImage {
                 Image(uiImage: img)
                     .resizable()
                     .scaledToFill()
@@ -296,9 +385,29 @@ struct AppIconBadge: View {
             }
         }
         .task(id: appId) {
-            guard allowRemoteIcon, appId > 0, remoteImage == nil else { return }
-            remoteImage = await UbusClient.shared.fetchAppIcon(appId: appId, allowInsecureTLS: allowInsecureTLS)
+            guard allowRemoteIcon, appId > 0 else { return }
+            if AppIconCache.shared.lookupSync(appId: appId) != nil || AppIconCache.shared.isKnownMissing(appId: appId) {
+                return
+            }
+            if let fetched = await AppIconCache.shared.fetchIfNeeded(appId: appId) {
+                loadedForAppId = appId
+                loadedImage = fetched
+            }
         }
+    }
+}
+
+// MARK: - Lightweight Progress Bar (Zero GeometryReader Pass)
+
+struct SlimProgressBar: View {
+    let fraction: Double
+    let color: Color
+
+    var body: some View {
+        ProgressView(value: min(1.0, max(0.02, fraction)), total: 1.0)
+            .progressViewStyle(.linear)
+            .tint(color)
+            .scaleEffect(x: 1, y: 1.35, anchor: .center)
     }
 }
 
@@ -359,14 +468,12 @@ struct DonutRingChart: View {
                     )
                     .rotationEffect(.degrees(-90))
                     .opacity(selectedSliceId == nil || isSelected ? 1.0 : 0.42)
-                    .animation(.spring(response: 0.35, dampingFraction: 0.78), value: selectedSliceId)
+                    .animation(.spring(response: 0.32, dampingFraction: 0.8), value: selectedSliceId)
                     .onTapGesture {
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                            if selectedSliceId == item.slice.id {
-                                selectedSliceId = nil
-                            } else {
-                                selectedSliceId = item.slice.id
-                            }
+                        if selectedSliceId == item.slice.id {
+                            selectedSliceId = nil
+                        } else {
+                            selectedSliceId = item.slice.id
                         }
                     }
             }
@@ -422,9 +529,9 @@ struct EmptyStateView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, 20)
+                .padding(.horizontal, 16)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 32)
+        .padding(.vertical, 28)
     }
 }

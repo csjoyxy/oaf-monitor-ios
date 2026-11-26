@@ -54,7 +54,6 @@ extension KeyedDecodingContainer {
         return defaultValue
     }
 
-    /// OpenWrt Lua `jsonc` often encodes an empty Lua table `{}` as `{}` instead of `[]`.
     func flexArray<T: Decodable>(_ keys: [Key], of type: T.Type = T.self) -> [T] {
         for key in keys {
             if let arr = try? decodeIfPresent([T].self, forKey: key) {
@@ -126,9 +125,9 @@ enum ActiveEndpointRoute: Equatable {
     }
 }
 
-// MARK: - Device Category Inference
+// MARK: - Device Category Inference (Precomputed once per model init)
 
-enum DeviceKind: String {
+enum DeviceKind: String, Equatable, Hashable {
     case iPhone
     case iPad
     case mac
@@ -215,7 +214,9 @@ struct OAFDevice: Identifiable, Decodable, Equatable, Hashable {
     var ip: String
     var ipv6: String
     var hostname: String
-    var nickname: String
+    var nickname: String {
+        didSet { kind = DeviceKind.infer(from: "\(nickname) \(hostname)") }
+    }
     var online: Int
     var active: Int
     var currentApp: String
@@ -234,10 +235,10 @@ struct OAFDevice: Identifiable, Decodable, Equatable, Hashable {
     var txRate: Int
     var rxRate: Int
     var sessionCount: Int
+    var kind: DeviceKind
 
-    var id: String { mac.uppercased() }
-
-    var normalizedMAC: String { mac.uppercased() }
+    var id: String { mac }
+    var normalizedMAC: String { mac }
 
     var displayName: String {
         if !nickname.isEmpty { return nickname }
@@ -256,7 +257,6 @@ struct OAFDevice: Identifiable, Decodable, Equatable, Hashable {
     var isActive: Bool { online == 1 && (active == 1 || !currentApp.isEmpty) }
     var todayTotalBytes: Int64 { todayUpBytes + todayDownBytes }
     var totalLiveRate: Int64 { upRate + downRate }
-    var kind: DeviceKind { DeviceKind.infer(from: "\(nickname) \(hostname)") }
 
     init(
         mac: String,
@@ -306,6 +306,7 @@ struct OAFDevice: Identifiable, Decodable, Equatable, Hashable {
         self.txRate = txRate
         self.rxRate = rxRate
         self.sessionCount = sessionCount
+        self.kind = DeviceKind.infer(from: "\(nickname) \(hostname)")
     }
 
     init(from decoder: Decoder) throws {
@@ -315,8 +316,10 @@ struct OAFDevice: Identifiable, Decodable, Equatable, Hashable {
         self.ip = c.flexString([k("ip")], default: "--")
         let v6 = c.flexString([k("ipv6")])
         self.ipv6 = (v6 == "::") ? "" : v6
-        self.hostname = c.flexString([k("hostname"), k("name")])
-        self.nickname = c.flexString([k("nickname")])
+        let host = c.flexString([k("hostname"), k("name")])
+        let nick = c.flexString([k("nickname")])
+        self.hostname = host
+        self.nickname = nick
         self.online = c.flexInt([k("online")])
         self.active = c.flexInt([k("active")])
         self.currentApp = c.flexString([k("app")])
@@ -335,6 +338,7 @@ struct OAFDevice: Identifiable, Decodable, Equatable, Hashable {
         self.txRate = c.flexInt([k("tx_rate")])
         self.rxRate = c.flexInt([k("rx_rate")])
         self.sessionCount = c.flexInt([k("session")])
+        self.kind = DeviceKind.infer(from: "\(nick) \(host)")
     }
 }
 
@@ -452,7 +456,7 @@ struct OAFVisitRecord: Identifiable, Decodable, Equatable {
         self.isFiltered = isFiltered
         self.isOnline = isOnline
         self.icon = icon
-        self.recordKey = "\(mac.uppercased())-\(appId)-\(firstTime)-\(latestTime)-\(durationSeconds)"
+        self.recordKey = "\(self.mac)-\(appId)-\(firstTime)-\(latestTime)"
     }
 
     init(from decoder: Decoder) throws {
@@ -475,7 +479,7 @@ struct OAFVisitRecord: Identifiable, Decodable, Equatable {
         self.isFiltered = c.flexInt([k("act"), k("latest_action")]) == 1
         self.isOnline = c.flexInt([k("online")]) == 1
         self.icon = c.flexInt([k("icon")], default: 1)
-        self.recordKey = "\(m)-\(aid)-\(ft)-\(lt)-\(tt)-\(UUID().uuidString.prefix(6))"
+        self.recordKey = "\(m)-\(aid)-\(ft)-\(lt)"
     }
 }
 
@@ -547,37 +551,63 @@ struct OAFHourlyStat: Identifiable, Decodable, Equatable {
     }
 }
 
+/// Supports both OAF 7.0.2 `get_user_records` (`action`, `online_duration`, `active_duration`, `up_bytes`, `down_bytes`, `recent_apps`)
+/// and legacy `get_online_offline_records` (`type`, `duration`).
 struct OAFOnlineOfflineEvent: Identifiable, Decodable, Equatable {
     var eventId: String
     var isOnlineEvent: Bool
     var timestamp: Int64
     var timeStr: String
-    var durationSeconds: Int
-    var durationStr: String
+    var onlineDurationSeconds: Int
+    var activeDurationSeconds: Int
+    var upBytes: Int64
+    var downBytes: Int64
+    var recentApps: [OAFBriefApp]
 
     var id: String { eventId }
+    var totalBytes: Int64 { upBytes + downBytes }
 
-    init(isOnlineEvent: Bool, timestamp: Int64, timeStr: String = "", durationSeconds: Int = 0, durationStr: String = "") {
+    init(
+        isOnlineEvent: Bool,
+        timestamp: Int64,
+        timeStr: String = "",
+        durationSeconds: Int = 0,
+        activeDurationSeconds: Int = 0,
+        upBytes: Int64 = 0,
+        downBytes: Int64 = 0,
+        recentApps: [OAFBriefApp] = []
+    ) {
         self.isOnlineEvent = isOnlineEvent
         self.timestamp = timestamp
         self.timeStr = timeStr
-        self.durationSeconds = durationSeconds
-        self.durationStr = durationStr
+        self.onlineDurationSeconds = durationSeconds
+        self.activeDurationSeconds = activeDurationSeconds
+        self.upBytes = upBytes
+        self.downBytes = downBytes
+        self.recentApps = recentApps
         self.eventId = "\(isOnlineEvent ? 0 : 1)-\(timestamp)-\(durationSeconds)"
     }
 
     init(from decoder: Decoder) throws {
         let k = DynamicCodingKey.init(_:)
         let c = try decoder.container(keyedBy: DynamicCodingKey.self)
-        let typeVal = c.flexInt([k("type")])
-        self.isOnlineEvent = (typeVal == 0)
+        let actionStr = c.flexString([k("action_str")]).lowercased()
+        let rawAction = c.flexInt([k("action"), k("type")], default: 0)
+        if !actionStr.isEmpty {
+            self.isOnlineEvent = (actionStr == "online")
+        } else {
+            self.isOnlineEvent = (rawAction == 0)
+        }
         let ts = c.flexInt64([k("timestamp"), k("time")])
         self.timestamp = ts
         self.timeStr = c.flexString([k("time_str")])
-        let dur = c.flexInt([k("duration")])
-        self.durationSeconds = dur
-        self.durationStr = c.flexString([k("duration_str")])
-        self.eventId = "\(typeVal)-\(ts)-\(dur)-\(UUID().uuidString.prefix(5))"
+        let onDur = c.flexInt([k("online_duration"), k("duration")])
+        self.onlineDurationSeconds = onDur
+        self.activeDurationSeconds = c.flexInt([k("active_duration")])
+        self.upBytes = c.flexInt64([k("up_bytes")])
+        self.downBytes = c.flexInt64([k("down_bytes")])
+        self.recentApps = c.flexArray([k("recent_apps")])
+        self.eventId = "\(self.isOnlineEvent ? 0 : 1)-\(ts)-\(onDur)"
     }
 }
 
@@ -622,7 +652,7 @@ struct OAFGlobalHourlyTraffic: Identifiable, Decodable, Equatable {
 
 struct BarkPushEvent: Identifiable, Decodable, Equatable {
     var eventId: String
-    var type: String // "online" or "offline"
+    var type: String
     var mac: String
     var name: String
     var ip: String
@@ -641,7 +671,7 @@ struct BarkPushEvent: Identifiable, Decodable, Equatable {
         self.detail = detail
         self.pushed = pushed
         self.timestamp = timestamp
-        self.eventId = "\(mac)-\(timestamp)-\(type)"
+        self.eventId = "\(self.mac)-\(timestamp)-\(type)"
     }
 
     init(from decoder: Decoder) throws {
@@ -657,7 +687,7 @@ struct BarkPushEvent: Identifiable, Decodable, Equatable {
         self.detail = c.flexString([k("detail")])
         self.pushed = c.flexInt([k("pushed")]) == 1
         self.timestamp = ts
-        self.eventId = "\(m)-\(ts)-\(t)-\(UUID().uuidString.prefix(4))"
+        self.eventId = "\(m)-\(ts)-\(t)"
     }
 }
 
@@ -667,7 +697,7 @@ struct BarkAgentConfig: Equatable, Decodable {
     var barkKey: String = ""
     var pollInterval: Int = 15
     var offlineDebounce: Int = 90
-    var watchMode: String = "selected" // "selected" or "all"
+    var watchMode: String = "selected"
     var notifyOnline: Bool = true
     var notifyOffline: Bool = true
     var includeSummary: Bool = true

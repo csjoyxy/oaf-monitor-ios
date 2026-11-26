@@ -120,15 +120,10 @@ struct LivePulseView: View {
                                                 .frame(width: 64, alignment: .trailing)
                                         }
 
-                                        GeometryReader { geo in
-                                            ZStack(alignment: .leading) {
-                                                Capsule().fill(Color.primary.opacity(0.06)).frame(height: 6)
-                                                Capsule()
-                                                    .fill(OAFTheme.color(at: idx))
-                                                    .frame(width: max(6, geo.size.width * (Double(dev.todayActiveTime) / Double(maxSec))), height: 6)
-                                            }
-                                        }
-                                        .frame(height: 6)
+                                        SlimProgressBar(
+                                            fraction: Double(dev.todayActiveTime) / Double(maxSec),
+                                            color: OAFTheme.color(at: idx)
+                                        )
                                     }
                                 }
                                 .buttonStyle(.plain)

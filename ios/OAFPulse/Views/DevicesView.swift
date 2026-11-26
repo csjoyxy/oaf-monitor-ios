@@ -237,7 +237,6 @@ private struct HeroSummaryBanner: View {
             RoundedRectangle(cornerRadius: 24, style: .continuous)
                 .fill(OAFTheme.heroGradient)
         )
-        .shadow(color: OAFTheme.primaryIndigo.opacity(0.24), radius: 16, x: 0, y: 8)
     }
 }
 

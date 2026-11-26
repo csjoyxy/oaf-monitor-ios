@@ -427,14 +427,16 @@ actor UbusClient {
         async let catTask = callFWXData(profile: profile, password: password, api: "app_class_visit_time", data: ["mac": lowerMac])
         async let hourlyTask = callFWXData(profile: profile, password: password, api: "get_hourly_top_apps", data: ["mac": lowerMac])
         async let visitTask = callFWXData(profile: profile, password: password, api: "dev_visit_list", data: ["mac": lowerMac, "page": page, "page_size": pageSize])
-        async let onOffTask = callFWXData(profile: profile, password: password, api: "get_online_offline_records", data: ["mac": lowerMac, "page": 1, "page_size": 40])
+        async let userRecTask = callFWXData(profile: profile, password: password, api: "get_user_records", data: ["mac": lowerMac, "page": 1, "page_size": 50])
+        async let legacyOnOffTask = callFWXData(profile: profile, password: password, api: "get_online_offline_records", data: ["mac": lowerMac, "page": 1, "page_size": 40])
 
         let basicRaw = try? await basicTask
         let durRaw = try? await durTask
         let catRaw = try? await catTask
         let hourlyRaw = try? await hourlyTask
         let visitRaw = try? await visitTask
-        let onOffRaw = try? await onOffTask
+        let userRecRaw = try? await userRecTask
+        let legacyOnOffRaw = try? await legacyOnOffTask
 
         var bundle = DeviceDetailBundle()
 
@@ -473,7 +475,12 @@ actor UbusClient {
             }
         }
 
-        if let oDict = onOffRaw as? [String: Any], let oList = (oDict["records"] ?? oDict["list"]) as? [Any] {
+        if let rDict = userRecRaw as? [String: Any], let rList = rDict["list"] as? [Any] {
+            bundle.onlineEvents = (try? decodeJSON([OAFOnlineOfflineEvent].self, from: rList)) ?? []
+        }
+        if bundle.onlineEvents.isEmpty,
+           let oDict = legacyOnOffRaw as? [String: Any],
+           let oList = (oDict["records"] ?? oDict["list"]) as? [Any] {
             bundle.onlineEvents = (try? decodeJSON([OAFOnlineOfflineEvent].self, from: oList)) ?? []
         }
 
