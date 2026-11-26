@@ -3,14 +3,17 @@ import Charts
 
 struct LivePulseView: View {
     @EnvironmentObject private var store: AppStore
+    @State private var inspectedApp: InspectedAppTarget?
 
     private var topDevicesByTime: [OAFDevice] {
         store.devices
+            .map(store.sanitizedDevice)
             .filter { $0.todayActiveTime > 0 || $0.todayTotalBytes > 0 }
             .sorted { $0.todayActiveTime > $1.todayActiveTime }
     }
 
     var body: some View {
+        let visibleRecords = store.filteredActiveRecords
         ScrollView {
             VStack(spacing: 16) {
                 // Card 1: Real-time Active App Sessions Across All Phones
@@ -20,12 +23,12 @@ struct LivePulseView: View {
                             Label("全网实时正在访问的应用", systemImage: "bolt.horizontal.fill")
                                 .font(.subheadline.weight(.bold))
                             Spacer()
-                            Text("\(store.activeRecords.count) 条活跃流")
+                            Text("\(visibleRecords.count) 条活跃流")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
 
-                        if store.activeRecords.isEmpty {
+                        if visibleRecords.isEmpty {
                             EmptyStateView(
                                 icon: "sparkles",
                                 title: "当前没有实时活跃应用会话",
@@ -33,9 +36,10 @@ struct LivePulseView: View {
                             )
                         } else {
                             VStack(spacing: 0) {
-                                ForEach(Array(store.activeRecords.prefix(25).enumerated()), id: \.element.id) { idx, rec in
-                                    let matchedDevice = store.devices.first(where: { $0.normalizedMAC == rec.mac })
+                                ForEach(Array(visibleRecords.prefix(25).enumerated()), id: \.element.id) { idx, rec in
+                                    let rawDevice = store.devices.first(where: { $0.normalizedMAC == rec.mac })
                                         ?? OAFDevice(mac: rec.mac, ip: "--", hostname: rec.hostname, nickname: rec.nickname, online: 1)
+                                    let matchedDevice = store.sanitizedDevice(rawDevice)
 
                                     NavigationLink(value: matchedDevice) {
                                         HStack(spacing: 12) {
@@ -71,14 +75,42 @@ struct LivePulseView: View {
                                                 .foregroundStyle(.tertiary)
                                         }
                                         .padding(.vertical, 10)
+                                        .contentShape(Rectangle())
                                     }
                                     .buttonStyle(.plain)
+                                    .contextMenu {
+                                        Button {
+                                            inspectedApp = InspectedAppTarget(appId: rec.appId, appName: rec.appName)
+                                        } label: {
+                                            Label("查看 OAF 特征规则与诊断", systemImage: "doc.text.magnifyingglass")
+                                        }
 
-                                    if idx < min(25, store.activeRecords.count) - 1 {
+                                        Button {
+                                            Task {
+                                                await store.setAppSoftIgnored(appId: rec.appId, appName: rec.appName, ignore: true)
+                                            }
+                                        } label: {
+                                            Label("标记为误报并隐藏", systemImage: "eye.slash")
+                                        }
+
+                                        Button(role: .destructive) {
+                                            Task {
+                                                _ = await store.setRouterFeatureRuleDisabled(appId: rec.appId, appName: rec.appName, disable: true)
+                                            }
+                                        } label: {
+                                            Label("从路由器特征库彻底禁用", systemImage: "scissors")
+                                        }
+                                    }
+
+                                    if idx < min(25, visibleRecords.count) - 1 {
                                         Divider().padding(.leading, 48)
                                     }
                                 }
                             }
+
+                            Text("提示：长按任意疑似误报的应用（如后台串扰游戏），可查看底层 DPI 特征或一键屏蔽")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
                         }
                     }
                 }
@@ -185,6 +217,9 @@ struct LivePulseView: View {
         .navigationTitle("全网动态")
         .refreshable {
             await store.refreshAll(showSpinner: false)
+        }
+        .sheet(item: $inspectedApp) { target in
+            FeatureRuleInspectorSheet(target: target)
         }
     }
 }

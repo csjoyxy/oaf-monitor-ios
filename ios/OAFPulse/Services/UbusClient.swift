@@ -644,4 +644,112 @@ actor UbusClient {
         }
         return msg
     }
+
+    func toggleIgnoreApp(
+        profile: RouterConnectionProfile,
+        password: String,
+        appId: Int,
+        appName: String,
+        ignore: Bool
+    ) async throws -> BarkAgentConfig {
+        let raw = try await callAuthenticated(
+            profile: profile,
+            password: password,
+            object: "oaf_bark",
+            method: "toggle_ignore_app",
+            arguments: [
+                "app_id": appId,
+                "app_name": appName,
+                "ignore": ignore ? 1 : 0
+            ]
+        )
+        guard let dict = raw as? [String: Any], let dataObj = dict["data"] else {
+            throw UbusClientError.barkAgentNotInstalled
+        }
+        return try decodeJSON(BarkAgentConfig.self, from: dataObj)
+    }
+
+    func inspectFeatureRule(
+        profile: RouterConnectionProfile,
+        password: String,
+        appId: Int,
+        appName: String
+    ) async throws -> OAFFeatureRuleInfo {
+        let raw = try await callAuthenticated(
+            profile: profile,
+            password: password,
+            object: "oaf_bark",
+            method: "inspect_feature",
+            arguments: [
+                "app_id": appId,
+                "app_name": appName
+            ]
+        )
+        guard let dict = raw as? [String: Any] else {
+            throw UbusClientError.rpcError("未收到特征库查询结果")
+        }
+        let code = (dict["code"] as? Int) ?? -1
+        if code != 0 {
+            let msg = (dict["message"] as? String) ?? "读取特征库失败，请先在路由器运行最新安装命令更新组件"
+            throw UbusClientError.rpcError(msg)
+        }
+        guard let dataObj = dict["data"] else {
+            throw UbusClientError.rpcError("特征库数据为空")
+        }
+        return try decodeJSON(OAFFeatureRuleInfo.self, from: dataObj)
+    }
+
+    func setFeatureRuleDisabled(
+        profile: RouterConnectionProfile,
+        password: String,
+        appId: Int,
+        appName: String,
+        disable: Bool
+    ) async throws -> BarkAgentConfig {
+        let raw = try await callAuthenticated(
+            profile: profile,
+            password: password,
+            object: "oaf_bark",
+            method: "set_feature_rule",
+            arguments: [
+                "app_id": appId,
+                "app_name": appName,
+                "disable": disable ? 1 : 0
+            ]
+        )
+        guard let dict = raw as? [String: Any] else {
+            throw UbusClientError.rpcError("修改特征库失败")
+        }
+        let code = (dict["code"] as? Int) ?? -1
+        if code != 0 {
+            let msg = (dict["message"] as? String) ?? "修改特征库失败，请确认已在路由器更新最新脚本"
+            throw UbusClientError.rpcError(msg)
+        }
+        guard let dataObj = dict["data"] else {
+            throw UbusClientError.rpcError("空响应")
+        }
+        return try decodeJSON(BarkAgentConfig.self, from: dataObj)
+    }
+
+    func restoreAllFeatures(profile: RouterConnectionProfile, password: String) async throws -> BarkAgentConfig {
+        let raw = try await callAuthenticated(
+            profile: profile,
+            password: password,
+            object: "oaf_bark",
+            method: "restore_all_features",
+            arguments: [:]
+        )
+        guard let dict = raw as? [String: Any] else {
+            throw UbusClientError.rpcError("还原特征库失败")
+        }
+        let code = (dict["code"] as? Int) ?? -1
+        if code != 0 {
+            let msg = (dict["message"] as? String) ?? "还原失败"
+            throw UbusClientError.rpcError(msg)
+        }
+        guard let dataObj = dict["data"] else {
+            throw UbusClientError.rpcError("空响应")
+        }
+        return try decodeJSON(BarkAgentConfig.self, from: dataObj)
+    }
 }

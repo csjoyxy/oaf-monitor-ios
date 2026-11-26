@@ -30,6 +30,7 @@ struct ToastBanner: Equatable, Identifiable {
 final class AppStore: ObservableObject {
     private static let profileKey = "oafpulse.router.profile.v1"
     private static let onboardedKey = "oafpulse.onboarded.v1"
+    private static let localIgnoredKey = "oafpulse.ignored.apps.v1"
     private static let passwordKeychainAccount = "router_password"
 
     @Published var profile: RouterConnectionProfile
@@ -46,7 +47,9 @@ final class AppStore: ObservableObject {
 
     @Published var categoryMap: [Int: String] = [:]
     @Published var barkConfig: BarkAgentConfig = BarkAgentConfig()
+    @Published var localIgnoredApps: [IgnoredAppEntry] = []
     @Published var isBarkAgentInstalled: Bool = false
+    @Published var ignoreRevision: Int = 0
 
     @Published var routeStatus: ActiveEndpointRoute = .disconnected
     @Published var isLoadingDevices: Bool = false
@@ -68,12 +71,88 @@ final class AppStore: ObservableObject {
         } else {
             self.profile = RouterConnectionProfile()
         }
+        if let ignData = UserDefaults.standard.data(forKey: Self.localIgnoredKey),
+           let savedIgn = try? JSONDecoder().decode([IgnoredAppEntry].self, from: ignData) {
+            self.localIgnoredApps = savedIgn
+        }
         self.password = KeychainHelper.read(account: Self.passwordKeychainAccount)
 
         let hasOnboarded = UserDefaults.standard.bool(forKey: Self.onboardedKey)
         if !hasOnboarded {
             self.showSetupSheet = true
         }
+    }
+
+    // MARK: - False-Positive Filtering Helpers
+
+    var effectiveIgnoredApps: [IgnoredAppEntry] {
+        var result: [IgnoredAppEntry] = []
+        for entry in barkConfig.ignoredApps + barkConfig.disabledRules + localIgnoredApps {
+            let exists = result.contains {
+                (entry.appId > 0 && $0.appId == entry.appId) || (!entry.name.isEmpty && $0.name == entry.name)
+            }
+            if !exists {
+                result.append(entry)
+            }
+        }
+        return result
+    }
+
+    /// Apps that are soft-hidden only (excluding those already listed under `barkConfig.disabledRules`).
+    var softOnlyIgnoredApps: [IgnoredAppEntry] {
+        effectiveIgnoredApps.filter { entry in
+            !barkConfig.disabledRules.contains { dis in
+                (entry.appId > 0 && dis.appId == entry.appId) || (!entry.name.isEmpty && dis.name == entry.name)
+            }
+        }
+    }
+
+    func isAppIgnored(appId: Int, name: String) -> Bool {
+        let list = effectiveIgnoredApps
+        guard !list.isEmpty else { return false }
+        return list.contains {
+            (appId > 0 && $0.appId == appId) || (!name.isEmpty && $0.name == name)
+        }
+    }
+
+    func sanitizedDevice(_ dev: OAFDevice) -> OAFDevice {
+        var copy = dev
+        copy.applist = dev.applist.filter { !isAppIgnored(appId: $0.appId, name: $0.name) }
+        if !copy.currentApp.isEmpty && isAppIgnored(appId: copy.currentAppId, name: copy.currentApp) {
+            if let fallback = copy.applist.first {
+                copy.currentApp = fallback.name
+                copy.currentAppId = fallback.appId
+            } else {
+                copy.currentApp = ""
+                copy.currentAppId = 0
+                copy.active = 0
+            }
+        }
+        return copy
+    }
+
+    func sanitizeDetail(_ bundle: DeviceDetailBundle) -> DeviceDetailBundle {
+        var out = bundle
+        if let basic = out.basicInfo {
+            out.basicInfo = sanitizedDevice(basic)
+        }
+        out.appDurations = bundle.appDurations.filter { !isAppIgnored(appId: $0.appId, name: $0.name) }
+        out.visitRecords = bundle.visitRecords.filter { !isAppIgnored(appId: $0.appId, name: $0.appName) }
+        out.hourlyStats = bundle.hourlyStats.map { h in
+            var copy = h
+            copy.apps = h.apps.filter { !isAppIgnored(appId: $0.appId, name: $0.name) }
+            return copy
+        }
+        out.onlineEvents = bundle.onlineEvents.map { ev in
+            var copy = ev
+            copy.recentApps = ev.recentApps.filter { !isAppIgnored(appId: $0.appId, name: $0.name) }
+            return copy
+        }
+        return out
+    }
+
+    var filteredActiveRecords: [OAFVisitRecord] {
+        activeRecords.filter { !isAppIgnored(appId: $0.appId, name: $0.appName) }
     }
 
     // MARK: - Computed Summaries & Filtered List
@@ -83,7 +162,7 @@ final class AppStore: ObservableObject {
     }
 
     var activeCount: Int {
-        devices.filter(\.isActive).count
+        devices.map(sanitizedDevice).filter(\.isActive).count
     }
 
     var todayTotalBytes: Int64 {
@@ -96,7 +175,8 @@ final class AppStore: ObservableObject {
 
     var filteredDevices: [OAFDevice] {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let filtered = devices.filter { dev in
+        let cleaned = devices.map(sanitizedDevice)
+        let filtered = cleaned.filter { dev in
             switch filterOption {
             case .all: break
             case .online: if !dev.isOnline { return false }
@@ -288,26 +368,29 @@ final class AppStore: ObservableObject {
 
     func loadDetail(for device: OAFDevice) async throws -> DeviceDetailBundle {
         if isDemoMode {
-            return DemoDataProvider.detail(for: device)
+            return sanitizeDetail(DemoDataProvider.detail(for: device))
         }
-        return try await UbusClient.shared.fetchDeviceDetail(
+        let raw = try await UbusClient.shared.fetchDeviceDetail(
             profile: profile,
             password: password,
             mac: device.normalizedMAC,
             categoryMap: categoryMap
         )
+        return sanitizeDetail(raw)
     }
 
     func loadMoreVisitRecords(for mac: String, page: Int) async throws -> (records: [OAFVisitRecord], page: Int, totalPages: Int) {
         if isDemoMode {
             return ([], 1, 1)
         }
-        return try await UbusClient.shared.fetchVisitRecordsPage(
+        let res = try await UbusClient.shared.fetchVisitRecordsPage(
             profile: profile,
             password: password,
             mac: mac,
             page: page
         )
+        let filtered = res.records.filter { !isAppIgnored(appId: $0.appId, name: $0.appName) }
+        return (filtered, res.page, res.totalPages)
     }
 
     func renameDevice(_ device: OAFDevice, nickname: String) async {
@@ -417,6 +500,118 @@ final class AppStore: ObservableObject {
             )
             UINotificationFeedbackGenerator().notificationOccurred(.success)
             showToast(msg)
+        } catch {
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            showToast(error.localizedDescription, isError: true)
+        }
+    }
+
+    // MARK: - False-Positive Inspection & Feature Rule Surgical Controls
+
+    private func persistLocalIgnored() {
+        if let data = try? JSONEncoder().encode(localIgnoredApps) {
+            UserDefaults.standard.set(data, forKey: Self.localIgnoredKey)
+        }
+    }
+
+    private func updateLocalIgnoredList(appId: Int, appName: String, ignore: Bool) {
+        localIgnoredApps.removeAll {
+            (appId > 0 && $0.appId == appId) || (!appName.isEmpty && $0.name == appName)
+        }
+        if ignore {
+            localIgnoredApps.append(IgnoredAppEntry(appId: appId, name: appName))
+        }
+        persistLocalIgnored()
+        ignoreRevision &+= 1
+    }
+
+    func inspectAppFeature(appId: Int, appName: String) async throws -> OAFFeatureRuleInfo {
+        if isDemoMode {
+            return OAFFeatureRuleInfo(
+                found: true,
+                version: "26.09.10",
+                appId: appId,
+                appName: appName,
+                rawRule: "\(appId)~\(appName):[udp;;;;;00:28|01:28,tcp;;;;;00:33|01:66]",
+                ruleBody: "[udp;;;;;00:28|01:28,tcp;;;;;00:33|01:66]",
+                isDisabled: false,
+                riskHint: "存在「不限端口、不限域名」的纯字节偏移特征，看直播/刷视频的高并发包极易随机撞上产生误报"
+            )
+        }
+        return try await UbusClient.shared.inspectFeatureRule(
+            profile: profile,
+            password: password,
+            appId: appId,
+            appName: appName
+        )
+    }
+
+    func setAppSoftIgnored(appId: Int, appName: String, ignore: Bool) async {
+        updateLocalIgnoredList(appId: appId, appName: appName, ignore: ignore)
+
+        if !isDemoMode && isBarkAgentInstalled {
+            if let updated = try? await UbusClient.shared.toggleIgnoreApp(
+                profile: profile,
+                password: password,
+                appId: appId,
+                appName: appName,
+                ignore: ignore
+            ) {
+                self.barkConfig = updated
+            }
+        }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        showToast(ignore ? "🚫 已将「\(appName)」标记为误报隐藏" : "已恢复显示「\(appName)」")
+    }
+
+    func setRouterFeatureRuleDisabled(appId: Int, appName: String, disable: Bool) async -> Bool {
+        if isDemoMode {
+            updateLocalIgnoredList(appId: appId, appName: appName, ignore: disable)
+            showToast(disable ? "演示：已禁用「\(appName)」特征规则" : "演示：已恢复「\(appName)」特征规则")
+            return true
+        }
+        do {
+            let updated = try await UbusClient.shared.setFeatureRuleDisabled(
+                profile: profile,
+                password: password,
+                appId: appId,
+                appName: appName,
+                disable: disable
+            )
+            self.barkConfig = updated
+            updateLocalIgnoredList(appId: appId, appName: appName, ignore: disable)
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            showToast(disable ? "✂️ 已从路由器特征库彻底禁用「\(appName)」并热重载生效" : "已恢复路由器特征库中的「\(appName)」规则")
+            return true
+        } catch {
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            showToast(error.localizedDescription, isError: true)
+            return false
+        }
+    }
+
+    func restoreAllRouterFeatures() async {
+        let previousDisabled = barkConfig.disabledRules
+        if isDemoMode {
+            for item in previousDisabled {
+                updateLocalIgnoredList(appId: item.appId, appName: item.name, ignore: false)
+            }
+            barkConfig.disabledRules = []
+            showToast("演示：已还原原厂特征库")
+            return
+        }
+        do {
+            let updated = try await UbusClient.shared.restoreAllFeatures(profile: profile, password: password)
+            for item in previousDisabled {
+                localIgnoredApps.removeAll {
+                    (item.appId > 0 && $0.appId == item.appId) || (!item.name.isEmpty && $0.name == item.name)
+                }
+            }
+            persistLocalIgnored()
+            self.barkConfig = updated
+            ignoreRevision &+= 1
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            showToast("已恢复路由器原厂特征库并热重载生效")
         } catch {
             UINotificationFeedbackGenerator().notificationOccurred(.error)
             showToast(error.localizedDescription, isError: true)

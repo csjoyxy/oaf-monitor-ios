@@ -7,6 +7,9 @@ struct BarkSettingsView: View {
     @State private var isSavingBark = false
     @State private var isSendingTest = false
     @State private var showCustomServer = false
+    @State private var showRestoreConfirm = false
+    @State private var isRestoringFeatures = false
+    @State private var inspectedApp: InspectedAppTarget?
 
     private let installOneLiner = "sh -c \"$(wget -qO- https://raw.githubusercontent.com/csjoyxy/oaf-monitor-ios/main/router-agent/install.sh)\""
 
@@ -20,7 +23,7 @@ struct BarkSettingsView: View {
                         showCustomServer: $showCustomServer,
                         isSaving: isSavingBark,
                         isTesting: isSendingTest,
-                        devices: store.devices,
+                        devices: store.devices.map(store.sanitizedDevice),
                         onSave: {
                             Task {
                                 isSavingBark = true
@@ -45,7 +48,38 @@ struct BarkSettingsView: View {
                     }
                 }
 
-                // Section 2: Recent Bark Events from Router RAM
+                // Section 2: False-Positive Apps & Router Feature Rule Surgical Management
+                FalsePositiveManagementCard(
+                    disabledRules: store.barkConfig.disabledRules,
+                    softIgnoredApps: store.softOnlyIgnoredApps,
+                    isBarkInstalled: store.isBarkAgentInstalled,
+                    isRestoringAll: isRestoringFeatures,
+                    installCommand: installOneLiner,
+                    allowRemoteIcon: !store.isDemoMode,
+                    allowInsecureTLS: store.profile.allowInsecureTLS,
+                    onInspect: { entry in
+                        inspectedApp = InspectedAppTarget(appId: entry.appId, appName: entry.name)
+                    },
+                    onRestoreSoft: { entry in
+                        Task {
+                            await store.setAppSoftIgnored(appId: entry.appId, appName: entry.name, ignore: false)
+                        }
+                    },
+                    onRestoreHard: { entry in
+                        Task {
+                            _ = await store.setRouterFeatureRuleDisabled(appId: entry.appId, appName: entry.name, disable: false)
+                        }
+                    },
+                    onRequestRestoreFactory: {
+                        showRestoreConfirm = true
+                    },
+                    onCopyUpgradeCommand: {
+                        UIPasteboard.general.string = installOneLiner
+                        store.showToast("已复制路由器脚本升级命令")
+                    }
+                )
+
+                // Section 3: Recent Bark Events from Router RAM
                 if store.isBarkAgentInstalled && !store.barkConfig.recentEvents.isEmpty {
                     BentoCard {
                         VStack(alignment: .leading, spacing: 12) {
@@ -87,7 +121,7 @@ struct BarkSettingsView: View {
                     }
                 }
 
-                // Section 3: Router Connection & Auto-Refresh Preferences
+                // Section 4: Router Connection & Auto-Refresh Preferences
                 BentoCard {
                     VStack(alignment: .leading, spacing: 14) {
                         Label("路由器连接与刷新", systemImage: "wifi.router.fill")
@@ -146,6 +180,25 @@ struct BarkSettingsView: View {
         }
         .onChange(of: store.barkConfig) { updated in
             draft = updated
+        }
+        .sheet(item: $inspectedApp) { target in
+            FeatureRuleInspectorSheet(target: target)
+        }
+        .confirmationDialog(
+            "确认将路由器特征库还原为原厂初始备份？",
+            isPresented: $showRestoreConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("还原原厂特征库并热重载", role: .destructive) {
+                Task {
+                    isRestoringFeatures = true
+                    await store.restoreAllRouterFeatures()
+                    isRestoringFeatures = false
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("将使用 /etc/fwxd/feature.bin.oafpulse.orig 备份无损还原所有被禁用的 OAF 特征规则，并立即热重载生效。")
         }
     }
 }
@@ -450,6 +503,191 @@ private struct BarkConfiguredPanel: View {
                         Text("提示：勾选后别忘了点击上方「保存配置到路由器」，或在终端详情页右上角一键点亮铃铛。")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - False-Positive & Router Feature Rule Management Card
+
+private struct FalsePositiveManagementCard: View {
+    let disabledRules: [IgnoredAppEntry]
+    let softIgnoredApps: [IgnoredAppEntry]
+    let isBarkInstalled: Bool
+    let isRestoringAll: Bool
+    let installCommand: String
+    let allowRemoteIcon: Bool
+    let allowInsecureTLS: Bool
+    let onInspect: (IgnoredAppEntry) -> Void
+    let onRestoreSoft: (IgnoredAppEntry) -> Void
+    let onRestoreHard: (IgnoredAppEntry) -> Void
+    let onRequestRestoreFactory: () -> Void
+    let onCopyUpgradeCommand: () -> Void
+
+    var body: some View {
+        BentoCard {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Label("误报应用与特征库管理", systemImage: "shield.lefthalf.filled")
+                        .font(.subheadline.weight(.bold))
+                    Spacer()
+                    let totalCount = disabledRules.count + softIgnoredApps.count
+                    if totalCount > 0 {
+                        Text("\(totalCount) 项已处理")
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(OAFTheme.primaryIndigo.opacity(0.12), in: Capsule())
+                            .foregroundStyle(OAFTheme.primaryIndigo)
+                    }
+                }
+
+                if disabledRules.isEmpty && softIgnoredApps.isEmpty {
+                    Text("当遇到腾讯/阿里等 SDK 后台流量串扰误报（如《地下城与勇士》《企鹅电竞》《QQ飞车》）时，可在终端详情页或全网动态页长按该应用，选择「查看特征规则」「仅隐藏」或「从路由器特征库彻底禁用」。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(3)
+                } else {
+                    if !disabledRules.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("已在路由器特征库禁用（内核不再匹配）")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(OAFTheme.coralRose)
+
+                            ForEach(disabledRules) { entry in
+                                HStack(spacing: 10) {
+                                    Button {
+                                        onInspect(entry)
+                                    } label: {
+                                        HStack(spacing: 10) {
+                                            AppIconBadge(
+                                                appId: entry.appId,
+                                                appName: entry.name.isEmpty ? "App \(entry.appId)" : entry.name,
+                                                allowRemoteIcon: allowRemoteIcon,
+                                                allowInsecureTLS: allowInsecureTLS,
+                                                size: 32
+                                            )
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(entry.name.isEmpty ? "App \(entry.appId)" : entry.name)
+                                                    .font(.subheadline.weight(.medium))
+                                                    .foregroundStyle(.primary)
+                                                if entry.appId > 0 {
+                                                    Text("ID: \(entry.appId) · 已从 feature.bin 注释并热重载")
+                                                        .font(.caption2)
+                                                        .foregroundStyle(.secondary)
+                                                }
+                                            }
+                                        }
+                                    }
+                                    .buttonStyle(.plain)
+
+                                    Spacer()
+
+                                    Button {
+                                        onRestoreHard(entry)
+                                    } label: {
+                                        Text("恢复启用")
+                                            .font(.caption.weight(.semibold))
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .background(OAFTheme.coralRose.opacity(0.12), in: Capsule())
+                                            .foregroundStyle(OAFTheme.coralRose)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                .padding(.vertical, 2)
+                            }
+                        }
+                    }
+
+                    if !disabledRules.isEmpty && !softIgnoredApps.isEmpty {
+                        Divider()
+                    }
+
+                    if !softIgnoredApps.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("仅在 App 与 Bark 通知中隐藏（软屏蔽）")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(OAFTheme.primaryIndigo)
+
+                            ForEach(softIgnoredApps) { entry in
+                                HStack(spacing: 10) {
+                                    Button {
+                                        onInspect(entry)
+                                    } label: {
+                                        HStack(spacing: 10) {
+                                            AppIconBadge(
+                                                appId: entry.appId,
+                                                appName: entry.name.isEmpty ? "App \(entry.appId)" : entry.name,
+                                                allowRemoteIcon: allowRemoteIcon,
+                                                allowInsecureTLS: allowInsecureTLS,
+                                                size: 32
+                                            )
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(entry.name.isEmpty ? "App \(entry.appId)" : entry.name)
+                                                    .font(.subheadline.weight(.medium))
+                                                    .foregroundStyle(.primary)
+                                                Text(entry.appId > 0 ? "ID: \(entry.appId) · 仅统计视图隐藏" : "仅统计视图隐藏")
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                    }
+                                    .buttonStyle(.plain)
+
+                                    Spacer()
+
+                                    Button {
+                                        onRestoreSoft(entry)
+                                    } label: {
+                                        Text("恢复显示")
+                                            .font(.caption.weight(.semibold))
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .background(OAFTheme.primaryIndigo.opacity(0.12), in: Capsule())
+                                            .foregroundStyle(OAFTheme.primaryIndigo)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                .padding(.vertical, 2)
+                            }
+                        }
+                    }
+
+                    if !disabledRules.isEmpty {
+                        Divider()
+                        Button(action: onRequestRestoreFactory) {
+                            HStack(spacing: 6) {
+                                if isRestoringAll {
+                                    ProgressView()
+                                } else {
+                                    Image(systemName: "arrow.counterclockwise")
+                                }
+                                Text(isRestoringAll ? "正在还原原厂特征库..." : "一键还原路由器原厂特征库")
+                                    .font(.footnote.weight(.semibold))
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .foregroundStyle(OAFTheme.coralRose)
+                            .background(OAFTheme.coralRose.opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        .disabled(isRestoringAll)
+                    }
+                }
+
+                if isBarkInstalled {
+                    HStack(spacing: 8) {
+                        Text("旧版路由端脚本升级为支持特征库解密/禁用的 v1.0.2：")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        Spacer()
+                        Button(action: onCopyUpgradeCommand) {
+                            Label("复制升级命令", systemImage: "doc.on.doc")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(OAFTheme.primaryIndigo)
+                        }
                     }
                 }
             }

@@ -22,12 +22,13 @@ struct DeviceDetailView: View {
     @State private var hourlyMetricIsTraffic: Bool = false
     @State private var showRenameAlert: Bool = false
     @State private var nicknameInput: String = ""
+    @State private var inspectedApp: InspectedAppTarget?
 
     private var liveDevice: OAFDevice {
         if let updated = store.devices.first(where: { $0.normalizedMAC == initialDevice.normalizedMAC }) {
-            return updated
+            return store.sanitizedDevice(updated)
         }
-        return detail.basicInfo ?? initialDevice
+        return store.sanitizedDevice(detail.basicInfo ?? initialDevice)
     }
 
     var body: some View {
@@ -35,7 +36,7 @@ struct DeviceDetailView: View {
             VStack(spacing: 16) {
                 DeviceHeroCard(
                     device: liveDevice,
-                    basicOverride: detail.basicInfo,
+                    basicOverride: detail.basicInfo.map(store.sanitizedDevice),
                     allowRemoteIcon: !store.isDemoMode,
                     allowInsecureTLS: store.profile.allowInsecureTLS,
                     onEditName: {
@@ -58,32 +59,51 @@ struct DeviceDetailView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 44)
                 } else {
+                    let cleanDetail = store.sanitizeDetail(detail)
                     switch segment {
                     case .stats:
                         AppStatsSection(
-                            durations: detail.appDurations,
-                            categories: detail.categoryDurations,
-                            hourlyStats: detail.hourlyStats,
+                            durations: cleanDetail.appDurations,
+                            categories: cleanDetail.categoryDurations,
+                            hourlyStats: cleanDetail.hourlyStats,
                             selectedSliceId: $selectedSliceId,
                             selectedHour: $selectedHour,
                             hourlyMetricIsTraffic: $hourlyMetricIsTraffic,
                             allowRemoteIcon: !store.isDemoMode,
-                            allowInsecureTLS: store.profile.allowInsecureTLS
+                            allowInsecureTLS: store.profile.allowInsecureTLS,
+                            onInspectApp: { aid, name in
+                                inspectedApp = InspectedAppTarget(appId: aid, appName: name)
+                            },
+                            onSoftIgnoreApp: { aid, name in
+                                Task { await store.setAppSoftIgnored(appId: aid, appName: name, ignore: true) }
+                            },
+                            onHardDisableApp: { aid, name in
+                                Task { _ = await store.setRouterFeatureRuleDisabled(appId: aid, appName: name, disable: true) }
+                            }
                         )
                     case .records:
                         VisitTimelineSection(
-                            records: detail.visitRecords,
-                            currentPage: detail.visitPage,
-                            totalPages: detail.visitTotalPages,
+                            records: cleanDetail.visitRecords,
+                            currentPage: cleanDetail.visitPage,
+                            totalPages: cleanDetail.visitTotalPages,
                             isLoadingMore: isLoadingMoreVisits,
                             allowRemoteIcon: !store.isDemoMode,
                             allowInsecureTLS: store.profile.allowInsecureTLS,
                             onLoadMore: {
                                 Task { await loadNextVisitPage() }
+                            },
+                            onInspectApp: { aid, name in
+                                inspectedApp = InspectedAppTarget(appId: aid, appName: name)
+                            },
+                            onSoftIgnoreApp: { aid, name in
+                                Task { await store.setAppSoftIgnored(appId: aid, appName: name, ignore: true) }
+                            },
+                            onHardDisableApp: { aid, name in
+                                Task { _ = await store.setRouterFeatureRuleDisabled(appId: aid, appName: name, disable: true) }
                             }
                         )
                     case .sessions:
-                        OnlineOfflineTimelineSection(events: detail.onlineEvents)
+                        OnlineOfflineTimelineSection(events: cleanDetail.onlineEvents)
                     }
                 }
             }
@@ -140,6 +160,12 @@ struct DeviceDetailView: View {
             }
         } message: {
             Text("MAC: \(liveDevice.normalizedMAC)")
+        }
+        .sheet(item: $inspectedApp) { target in
+            FeatureRuleInspectorSheet(target: target) {
+                detail = store.sanitizeDetail(detail)
+            }
+            .environmentObject(store)
         }
     }
 
@@ -414,6 +440,9 @@ private struct AppStatsSection: View {
     @Binding var hourlyMetricIsTraffic: Bool
     let allowRemoteIcon: Bool
     let allowInsecureTLS: Bool
+    let onInspectApp: (Int, String) -> Void
+    let onSoftIgnoreApp: (Int, String) -> Void
+    let onHardDisableApp: (Int, String) -> Void
 
     private var totalAppSeconds: Int {
         max(1, durations.reduce(0) { $0 + $1.seconds })
@@ -446,9 +475,9 @@ private struct AppStatsSection: View {
                             .font(.subheadline.weight(.bold))
                             .foregroundStyle(.primary)
                         Spacer()
-                        Text("共 \(durations.count) 款应用")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        Text("长按应用可排查误报")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
                     }
 
                     if durations.isEmpty {
@@ -497,8 +526,23 @@ private struct AppStatsSection: View {
                                 .opacity(isHighlighted ? 1.0 : 0.4)
                                 .contentShape(Rectangle())
                                 .onTapGesture {
-                                    withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) {
-                                        selectedSliceId = (selectedSliceId == item.id) ? nil : item.id
+                                    selectedSliceId = (selectedSliceId == item.id) ? nil : item.id
+                                }
+                                .contextMenu {
+                                    Button {
+                                        onInspectApp(item.appId, item.name)
+                                    } label: {
+                                        Label("查看 OAF 特征规则（排查误报）", systemImage: "stethoscope")
+                                    }
+                                    Button {
+                                        onSoftIgnoreApp(item.appId, item.name)
+                                    } label: {
+                                        Label("标记为误报并隐藏", systemImage: "eye.slash")
+                                    }
+                                    Button(role: .destructive) {
+                                        onHardDisableApp(item.appId, item.name)
+                                    } label: {
+                                        Label("从路由器特征库彻底禁用", systemImage: "scissors")
                                     }
                                 }
                             }
@@ -668,6 +712,9 @@ private struct VisitTimelineSection: View {
     let allowRemoteIcon: Bool
     let allowInsecureTLS: Bool
     let onLoadMore: () -> Void
+    let onInspectApp: (Int, String) -> Void
+    let onSoftIgnoreApp: (Int, String) -> Void
+    let onHardDisableApp: (Int, String) -> Void
 
     var body: some View {
         BentoCard {
@@ -676,7 +723,7 @@ private struct VisitTimelineSection: View {
                     Label("应用访问流水", systemImage: "list.bullet.rectangle.portrait.fill")
                         .font(.subheadline.weight(.bold))
                     Spacer()
-                    Text("按最近活跃排序")
+                    Text("长按记录可排查误报")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -738,6 +785,24 @@ private struct VisitTimelineSection: View {
                                 }
                             }
                             .padding(.vertical, 11)
+                            .contentShape(Rectangle())
+                            .contextMenu {
+                                Button {
+                                    onInspectApp(rec.appId, rec.appName)
+                                } label: {
+                                    Label("查看 OAF 特征规则（排查误报）", systemImage: "stethoscope")
+                                }
+                                Button {
+                                    onSoftIgnoreApp(rec.appId, rec.appName)
+                                } label: {
+                                    Label("标记为误报并隐藏", systemImage: "eye.slash")
+                                }
+                                Button(role: .destructive) {
+                                    onHardDisableApp(rec.appId, rec.appName)
+                                } label: {
+                                    Label("从路由器特征库彻底禁用", systemImage: "scissors")
+                                }
+                            }
 
                             if idx < records.count - 1 {
                                 Divider().padding(.leading, 48)

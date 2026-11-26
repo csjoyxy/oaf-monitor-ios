@@ -269,7 +269,9 @@ local function load_config()
         quiet_enable = 0,
         quiet_start = "23:30",
         quiet_end = "07:00",
-        watched_macs = {}
+        watched_macs = {},
+        ignored_ids = {},
+        ignored_names = {}
     }
 
     local f = io.open(CONFIG_FILE, "r")
@@ -295,6 +297,14 @@ local function load_config()
             if lk == "watched_mac" and lv then
                 local nm = norm_mac(lv)
                 if nm ~= "" then cfg.watched_macs[nm] = true end
+            elseif (lk == "ignored_app" or lk == "disabled_rule") and lv then
+                local id_s, aname = string.match(lv, "^(%d+)~(.*)$")
+                if id_s and tonumber(id_s) and tonumber(id_s) > 0 then
+                    cfg.ignored_ids[tonumber(id_s)] = true
+                end
+                if aname and aname ~= "" then
+                    cfg.ignored_names[aname] = true
+                end
             end
         end
     end
@@ -384,7 +394,7 @@ local function send_bark_push(cfg, title, body, mac)
     return (rc == 0 or rc == true)
 end
 
-local function build_top_apps_summary(mac)
+local function build_top_apps_summary(cfg, mac)
     local resp = call_fwx("dev_visit_time", { mac = string.lower(mac) })
     if not (resp and tonumber(resp.code) == 2000 and resp.data and type(resp.data.list) == "table") then
         return nil
@@ -394,13 +404,16 @@ local function build_top_apps_summary(mac)
     table.sort(list, function(a, b) return (tonumber(a.t) or 0) > (tonumber(b.t) or 0) end)
 
     local parts = {}
-    for i = 1, math.min(3, #list) do
+    for i = 1, #list do
         local item = list[i]
         local dur = tonumber(item.t) or 0
-        if dur >= 30 then
-            local name = item.name
-            if not name or name == "" then name = "App" .. tostring(item.id or item.appid or i) end
+        local aid = tonumber(item.id or item.appid) or 0
+        local name = item.name or ""
+        local is_ignored = (aid > 0 and cfg.ignored_ids[aid]) or (name ~= "" and cfg.ignored_names[name])
+        if dur >= 30 and not is_ignored then
+            if name == "" then name = "App" .. tostring(aid > 0 and aid or i) end
             table.insert(parts, string.format("%s(%s)", name, format_duration(dur)))
+            if #parts >= 3 then break end
         end
     end
     return (#parts > 0) and table.concat(parts, "、") or nil
@@ -525,7 +538,7 @@ while true do
                                         if total_bytes > 1048576 then table.insert(summary_parts, "流量 " .. format_bytes(total_bytes)) end
                                         local line1 = table.concat(summary_parts, " · ")
 
-                                        local top_apps = (cfg.include_summary == 1) and build_top_apps_summary(mac) or nil
+                                        local top_apps = (cfg.include_summary == 1) and build_top_apps_summary(cfg, mac) or nil
                                         local pushed = false
                                         if cfg.notify_offline == 1 and not is_in_quiet_hours(cfg) then
                                             local lines = {}

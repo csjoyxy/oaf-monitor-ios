@@ -271,6 +271,15 @@ local function is_daemon_running()
     return 0
 end
 
+local function parse_id_name_pair(raw)
+    if not raw or raw == "" then return nil end
+    local id_s, nm = string.match(raw, "^(%d+)~(.*)$")
+    if id_s then
+        return { id = tonumber(id_s) or 0, name = nm or "" }
+    end
+    return { id = 0, name = raw }
+end
+
 local function read_config_file()
     local cfg = {
         enabled = 0,
@@ -286,6 +295,8 @@ local function read_config_file()
         quiet_start = "23:30",
         quiet_end = "07:00",
         watched_macs = make_array({}),
+        ignored_apps = make_array({}),
+        disabled_rules = make_array({}),
         daemon_running = is_daemon_running(),
         recent_events = make_array(read_tmp_json(EVENTS_TMP_FILE) or {}),
         state = read_tmp_json(STATE_TMP_FILE) or {}
@@ -294,6 +305,8 @@ local function read_config_file()
     local f = io.open(CONFIG_FILE, "r")
     if not f then return cfg end
     local mac_seen = {}
+    local ign_seen = {}
+    local dis_seen = {}
     for line in f:lines() do
         local k, v = string.match(line, "^%s*option%s+([%w_]+)%s+['\"]?(.-)['\"]?%s*$")
         if k and v then
@@ -318,6 +331,14 @@ local function read_config_file()
                     mac_seen[nm] = true
                     table.insert(cfg.watched_macs, nm)
                 end
+            elseif lk == "ignored_app" and lv and not ign_seen[lv] then
+                ign_seen[lv] = true
+                local p = parse_id_name_pair(lv)
+                if p then table.insert(cfg.ignored_apps, p) end
+            elseif lk == "disabled_rule" and lv and not dis_seen[lv] then
+                dis_seen[lv] = true
+                local p = parse_id_name_pair(lv)
+                if p then table.insert(cfg.disabled_rules, p) end
             end
         end
     end
@@ -355,6 +376,26 @@ local function write_config_file(cfg)
             end
         end
     end
+    if type(cfg.ignored_apps) == "table" then
+        local seen = {}
+        for _, item in ipairs(cfg.ignored_apps) do
+            local key = string.format("%d~%s", tonumber(item.id) or 0, sanitize_uci_val(item.name or ""))
+            if not seen[key] then
+                seen[key] = true
+                table.insert(lines, string.format("\tlist ignored_app '%s'", key))
+            end
+        end
+    end
+    if type(cfg.disabled_rules) == "table" then
+        local seen = {}
+        for _, item in ipairs(cfg.disabled_rules) do
+            local key = string.format("%d~%s", tonumber(item.id) or 0, sanitize_uci_val(item.name or ""))
+            if not seen[key] then
+                seen[key] = true
+                table.insert(lines, string.format("\tlist disabled_rule '%s'", key))
+            end
+        end
+    end
     local tmp = CONFIG_FILE .. ".tmp"
     local f = io.open(tmp, "w")
     if f then
@@ -362,6 +403,36 @@ local function write_config_file(cfg)
         f:close()
         os.rename(tmp, CONFIG_FILE)
     end
+end
+
+local function upsert_app_list(list, target_id, target_name, add_flag)
+    local out = make_array({})
+    local tid = tonumber(target_id) or 0
+    local tname = tostring(target_name or "")
+    for _, item in ipairs(list or {}) do
+        local same_id = (tid > 0 and tonumber(item.id) == tid)
+        local same_name = (tname ~= "" and item.name == tname)
+        if not (same_id or same_name) then
+            table.insert(out, item)
+        end
+    end
+    if add_flag then
+        table.insert(out, { id = tid, name = tname })
+    end
+    return out
+end
+
+local function load_feature_tool()
+    local paths = { "/usr/bin/oaf-feature-tool", "./router-agent/oaf-feature-tool.lua" }
+    for _, p in ipairs(paths) do
+        local f = io.open(p, "r")
+        if f then
+            f:close()
+            local ok, mod = pcall(dofile, p)
+            if ok and mod then return mod end
+        end
+    end
+    return nil
 end
 
 local function apply_service_state(enabled)
@@ -398,6 +469,21 @@ local methods = {
         mac = "str",
         watch = 32
     },
+    toggle_ignore_app = {
+        app_id = 32,
+        app_name = "str",
+        ignore = 32
+    },
+    inspect_feature = {
+        app_id = 32,
+        app_name = "str"
+    },
+    set_feature_rule = {
+        app_id = 32,
+        app_name = "str",
+        disable = 32
+    },
+    restore_all_features = {},
     test_push = {
         bark_server = "str",
         bark_key = "str",
@@ -476,6 +562,76 @@ elseif arg[1] == "call" then
         cur.watched_macs = clean
         write_config_file(cur)
         io.write(json_encode({ code = 0, data = read_config_file() }))
+        os.exit(0)
+
+    elseif method == "toggle_ignore_app" then
+        local aid = tonumber(req.app_id) or 0
+        local aname = tostring(req.app_name or "")
+        local ign = (tonumber(req.ignore) == 1)
+        if aid <= 0 and aname == "" then
+            io.write(json_encode({ code = 1, message = "无效的应用参数" }))
+            os.exit(0)
+        end
+        local cur = read_config_file()
+        cur.ignored_apps = upsert_app_list(cur.ignored_apps, aid, aname, ign)
+        write_config_file(cur)
+        io.write(json_encode({ code = 0, data = read_config_file() }))
+        os.exit(0)
+
+    elseif method == "inspect_feature" then
+        local ft = load_feature_tool()
+        if not ft then
+            io.write(json_encode({ code = 1, message = "未找到 /usr/bin/oaf-feature-tool，请重新运行路由器安装命令更新脚本" }))
+            os.exit(0)
+        end
+        local info, err = ft.inspect(tonumber(req.app_id) or 0, tostring(req.app_name or ""))
+        if not info then
+            io.write(json_encode({ code = 2, message = tostring(err) }))
+            os.exit(0)
+        end
+        io.write(json_encode({ code = 0, data = info }))
+        os.exit(0)
+
+    elseif method == "set_feature_rule" then
+        local ft = load_feature_tool()
+        if not ft then
+            io.write(json_encode({ code = 1, message = "未找到 /usr/bin/oaf-feature-tool，请重新运行路由器安装命令更新脚本" }))
+            os.exit(0)
+        end
+        local aid = tonumber(req.app_id) or 0
+        local aname = tostring(req.app_name or "")
+        local disable_flag = (tonumber(req.disable) == 1)
+        local ok, msg = ft.set_rule_disabled(aid, aname, disable_flag)
+        if not ok then
+            io.write(json_encode({ code = 2, message = tostring(msg) }))
+            os.exit(0)
+        end
+        local resolved_name = (msg and msg ~= "" and msg ~= "ok") and msg or aname
+        local cur = read_config_file()
+        cur.disabled_rules = upsert_app_list(cur.disabled_rules, aid, resolved_name, disable_flag)
+        cur.ignored_apps = upsert_app_list(cur.ignored_apps, aid, resolved_name, disable_flag)
+        write_config_file(cur)
+        io.write(json_encode({ code = 0, message = "ok", data = read_config_file() }))
+        os.exit(0)
+
+    elseif method == "restore_all_features" then
+        local ft = load_feature_tool()
+        if not ft then
+            io.write(json_encode({ code = 1, message = "未找到 /usr/bin/oaf-feature-tool" }))
+            os.exit(0)
+        end
+        local ok, err = ft.restore_all_orig()
+        if not ok then
+            io.write(json_encode({ code = 2, message = tostring(err) }))
+            os.exit(0)
+        end
+        local cur = read_config_file()
+        for _, item in ipairs(cur.disabled_rules or {}) do
+            cur.ignored_apps = upsert_app_list(cur.ignored_apps, item.id, item.name, false)
+        end
+        cur.disabled_rules = make_array({})
+        write_config_file(cur)
+        io.write(json_encode({ code = 0, message = "已恢复原厂特征库并热重载生效", data = read_config_file() }))
         os.exit(0)
 
     elseif method == "test_push" then

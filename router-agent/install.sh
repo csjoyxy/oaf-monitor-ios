@@ -32,17 +32,19 @@ mkdir -p /usr/bin /usr/libexec/rpcd /usr/share/rpcd/acl.d /etc/init.d /etc/confi
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || echo "")"
 if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/oaf-barkd.lua" ]; then
     cp "$SCRIPT_DIR/oaf-barkd.lua" /usr/bin/oaf-barkd
+    cp "$SCRIPT_DIR/oaf-feature-tool.lua" /usr/bin/oaf-feature-tool
     cp "$SCRIPT_DIR/rpcd-oaf-bark.lua" /usr/libexec/rpcd/oaf_bark
     cp "$SCRIPT_DIR/oaf-bark.init" /etc/init.d/oaf-bark
     cp "$SCRIPT_DIR/oaf-bark.acl.json" /usr/share/rpcd/acl.d/oaf-bark.json
 else
     fetch_file "$REPO_RAW/oaf-barkd.lua" /usr/bin/oaf-barkd
+    fetch_file "$REPO_RAW/oaf-feature-tool.lua" /usr/bin/oaf-feature-tool
     fetch_file "$REPO_RAW/rpcd-oaf-bark.lua" /usr/libexec/rpcd/oaf_bark
     fetch_file "$REPO_RAW/oaf-bark.init" /etc/init.d/oaf-bark
     fetch_file "$REPO_RAW/oaf-bark.acl.json" /usr/share/rpcd/acl.d/oaf-bark.json
 fi
 
-chmod 0755 /usr/bin/oaf-barkd /usr/libexec/rpcd/oaf_bark /etc/init.d/oaf-bark
+chmod 0755 /usr/bin/oaf-barkd /usr/bin/oaf-feature-tool /usr/libexec/rpcd/oaf_bark /etc/init.d/oaf-bark
 chmod 0644 /usr/share/rpcd/acl.d/oaf-bark.json
 
 if [ ! -f /etc/config/oaf_bark ]; then

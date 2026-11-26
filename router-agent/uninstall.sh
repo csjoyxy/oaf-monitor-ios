@@ -7,6 +7,7 @@ echo "==> [OAF Pulse] 正在卸载上下线 Bark 通知组件..."
 /etc/init.d/oaf-bark disable >/dev/null 2>&1 || true
 
 rm -f /usr/bin/oaf-barkd \
+      /usr/bin/oaf-feature-tool \
       /usr/libexec/rpcd/oaf_bark \
       /etc/init.d/oaf-bark \
       /usr/share/rpcd/acl.d/oaf-bark.json \

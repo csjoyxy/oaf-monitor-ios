@@ -691,6 +691,76 @@ struct BarkPushEvent: Identifiable, Decodable, Equatable {
     }
 }
 
+struct IgnoredAppEntry: Identifiable, Codable, Equatable, Hashable {
+    var appId: Int
+    var name: String
+
+    var id: String { "\(appId)-\(name)" }
+
+    init(appId: Int, name: String) {
+        self.appId = appId
+        self.name = name
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case appId = "id"
+        case name
+    }
+
+    init(from decoder: Decoder) throws {
+        let k = DynamicCodingKey.init(_:)
+        let c = try decoder.container(keyedBy: DynamicCodingKey.self)
+        self.appId = c.flexInt([k("id"), k("appId"), k("app_id")])
+        self.name = c.flexString([k("name"), k("app_name")])
+    }
+}
+
+struct OAFFeatureRuleInfo: Identifiable, Decodable, Equatable {
+    var found: Bool
+    var version: String
+    var appId: Int
+    var appName: String
+    var rawRule: String
+    var ruleBody: String
+    var isDisabled: Bool
+    var riskHint: String
+
+    var id: String { "\(appId)-\(appName)" }
+
+    init(
+        found: Bool = true,
+        version: String = "",
+        appId: Int,
+        appName: String,
+        rawRule: String,
+        ruleBody: String = "",
+        isDisabled: Bool = false,
+        riskHint: String = ""
+    ) {
+        self.found = found
+        self.version = version
+        self.appId = appId
+        self.appName = appName
+        self.rawRule = rawRule
+        self.ruleBody = ruleBody
+        self.isDisabled = isDisabled
+        self.riskHint = riskHint
+    }
+
+    init(from decoder: Decoder) throws {
+        let k = DynamicCodingKey.init(_:)
+        let c = try decoder.container(keyedBy: DynamicCodingKey.self)
+        self.found = c.flexInt([k("found")]) == 1
+        self.version = c.flexString([k("version")])
+        self.appId = c.flexInt([k("app_id")])
+        self.appName = c.flexString([k("app_name")])
+        self.rawRule = c.flexString([k("raw_rule")])
+        self.ruleBody = c.flexString([k("rule_body")])
+        self.isDisabled = c.flexInt([k("is_disabled")]) == 1
+        self.riskHint = c.flexString([k("risk_hint")])
+    }
+}
+
 struct BarkAgentConfig: Equatable, Decodable {
     var enabled: Bool = false
     var barkServer: String = "https://api.day.app"
@@ -705,6 +775,8 @@ struct BarkAgentConfig: Equatable, Decodable {
     var quietStart: String = "23:30"
     var quietEnd: String = "07:00"
     var watchedMACs: [String] = []
+    var ignoredApps: [IgnoredAppEntry] = []
+    var disabledRules: [IgnoredAppEntry] = []
     var daemonRunning: Bool = false
     var recentEvents: [BarkPushEvent] = []
 
@@ -724,6 +796,8 @@ struct BarkAgentConfig: Equatable, Decodable {
         quietStart: String = "23:30",
         quietEnd: String = "07:00",
         watchedMACs: [String] = [],
+        ignoredApps: [IgnoredAppEntry] = [],
+        disabledRules: [IgnoredAppEntry] = [],
         daemonRunning: Bool = true,
         recentEvents: [BarkPushEvent] = []
     ) {
@@ -740,6 +814,8 @@ struct BarkAgentConfig: Equatable, Decodable {
         self.quietStart = quietStart
         self.quietEnd = quietEnd
         self.watchedMACs = watchedMACs.map { $0.uppercased() }
+        self.ignoredApps = ignoredApps
+        self.disabledRules = disabledRules
         self.daemonRunning = daemonRunning
         self.recentEvents = recentEvents
     }
@@ -762,6 +838,8 @@ struct BarkAgentConfig: Equatable, Decodable {
         self.quietStart = c.flexString([k("quiet_start")], default: "23:30")
         self.quietEnd = c.flexString([k("quiet_end")], default: "07:00")
         self.watchedMACs = c.flexArray([k("watched_macs")], of: String.self).map { $0.uppercased() }
+        self.ignoredApps = c.flexArray([k("ignored_apps")], of: IgnoredAppEntry.self)
+        self.disabledRules = c.flexArray([k("disabled_rules")], of: IgnoredAppEntry.self)
         self.daemonRunning = c.flexInt([k("daemon_running")]) == 1
         self.recentEvents = c.flexArray([k("recent_events")], of: BarkPushEvent.self)
     }
