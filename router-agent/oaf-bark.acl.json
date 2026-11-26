@@ -1,0 +1,19 @@
+{
+  "oaf-bark": {
+    "description": "Grant ubus access to OAF 7.0 statistics and Bark notifier for OAF Pulse",
+    "read": {
+      "uci": ["fwx", "oaf_bark"],
+      "ubus": {
+        "fwx": ["common"],
+        "oaf_bark": ["get_config", "test_push"]
+      }
+    },
+    "write": {
+      "uci": ["oaf_bark"],
+      "ubus": {
+        "fwx": ["common"],
+        "oaf_bark": ["set_config", "toggle_device", "test_push", "clear_events"]
+      }
+    }
+  }
+}

@@ -1,0 +1,10 @@
+# Xcode & Build artifacts
+build/
+dist/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+*.ipa
+*.tipa
+.DS_Store

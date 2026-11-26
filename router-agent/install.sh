@@ -1,0 +1,71 @@
+#!/bin/sh
+# One-line installer for OAF Pulse Router Bark Agent (OpenWrt + OAF 7.0+)
+set -e
+
+REPO_RAW="https://raw.githubusercontent.com/csjoyxy/oaf-monitor-ios/main/router-agent"
+
+echo "==> [OAF Pulse] 正在安装超轻量上下线 Bark 通知组件..."
+
+fetch_file() {
+    src="$1"
+    dst="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL -m 20 "$src" -o "$dst"
+    elif command -v uclient-fetch >/dev/null 2>&1; then
+        uclient-fetch -q -T 20 -O "$dst" "$src"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -T 20 -O "$dst" "$src"
+    else
+        echo "错误：未找到 curl / uclient-fetch / wget，无法下载脚本。" >&2
+        exit 1
+    fi
+}
+
+[ -x /usr/bin/lua ] || {
+    echo "错误：未检测到 /usr/bin/lua（OAF 7.0 依赖默认已包含 Lua）。" >&2
+    exit 1
+}
+
+mkdir -p /usr/bin /usr/libexec/rpcd /usr/share/rpcd/acl.d /etc/init.d /etc/config
+
+# Support both local directory install and remote one-liner install
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || echo "")"
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/oaf-barkd.lua" ]; then
+    cp "$SCRIPT_DIR/oaf-barkd.lua" /usr/bin/oaf-barkd
+    cp "$SCRIPT_DIR/rpcd-oaf-bark.lua" /usr/libexec/rpcd/oaf_bark
+    cp "$SCRIPT_DIR/oaf-bark.init" /etc/init.d/oaf-bark
+    cp "$SCRIPT_DIR/oaf-bark.acl.json" /usr/share/rpcd/acl.d/oaf-bark.json
+else
+    fetch_file "$REPO_RAW/oaf-barkd.lua" /usr/bin/oaf-barkd
+    fetch_file "$REPO_RAW/rpcd-oaf-bark.lua" /usr/libexec/rpcd/oaf_bark
+    fetch_file "$REPO_RAW/oaf-bark.init" /etc/init.d/oaf-bark
+    fetch_file "$REPO_RAW/oaf-bark.acl.json" /usr/share/rpcd/acl.d/oaf-bark.json
+fi
+
+chmod 0755 /usr/bin/oaf-barkd /usr/libexec/rpcd/oaf_bark /etc/init.d/oaf-bark
+chmod 0644 /usr/share/rpcd/acl.d/oaf-bark.json
+
+if [ ! -f /etc/config/oaf_bark ]; then
+    cat > /etc/config/oaf_bark <<'EOF'
+config global 'main'
+	option enabled '0'
+	option bark_server 'https://api.day.app'
+	option bark_key ''
+	option poll_interval '15'
+	option offline_debounce '90'
+	option watch_mode 'selected'
+	option notify_online '1'
+	option notify_offline '1'
+	option include_summary '1'
+	option quiet_enable '0'
+	option quiet_start '23:30'
+	option quiet_end '07:00'
+EOF
+fi
+
+/etc/init.d/rpcd restart >/dev/null 2>&1 || /etc/init.d/rpcd reload >/dev/null 2>&1 || true
+/etc/init.d/oaf-bark enable >/dev/null 2>&1 || true
+/etc/init.d/oaf-bark restart >/dev/null 2>&1 || true
+
+echo "==> [OAF Pulse] 安装完成！"
+echo "    现在可以直接打开手机上的 OAF Pulse App ->「提醒与设置」填写 Bark Key 并勾选要提醒的手机。"

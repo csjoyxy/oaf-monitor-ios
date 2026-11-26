@@ -1,0 +1,86 @@
+name: Build TrollStore TIPA & IPA
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Publish or update GitHub Release"
+        type: boolean
+        default: true
+      release_tag:
+        description: "Release tag (e.g. v1.0.0)"
+        type: string
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-ios:
+    name: Build iOS 16.0+ (TrollStore .tipa & .ipa)
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen and ldid
+        run: |
+          for pkg in xcodegen ldid; do
+            brew list "$pkg" >/dev/null 2>&1 || brew install "$pkg"
+          done
+
+      - name: Build OAFPulse (.tipa & .ipa)
+        run: bash scripts/build-tipa.sh
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: OAFPulse-TrollStore-Packages
+          path: |
+            dist/OAFPulse-TrollStore.tipa
+            dist/OAFPulse-unsigned.ipa
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="${INPUT_TAG:-v1.0.0}"
+          fi
+
+          cat > dist/release-notes.md <<EOF
+          ## OAF Pulse ${TAG}
+
+          专为 **OpenWrt + OpenAppFilter (OAF 7.0+)** 打造的现代原生 iOS 统计查看器与极轻量上下线 Bark 通知方案（支持 **iOS 16.0+**，完美兼容 **iOS 16.4.1 巨魔 TrollStore**）。
+
+          ### 📦 安装包说明
+          - **\`OAFPulse-TrollStore.tipa\`**（推荐）：手机 Safari 下载后直接分享到 **TrollStore（巨魔）** 一键安装，永久有效不掉签。
+          - **\`OAFPulse-unsigned.ipa\`**：标准无签名 IPA，适用于巨魔或自签工具（Sideloadly / Feather / AltStore）。
+
+          ### 🔔 路由器端超轻量上下线 Bark 脚本（可选）
+          SSH 登录 OpenWrt 路由器执行一行命令即可安装（CPU 占用 < 0.01%，0 闪存写入）：
+          \`\`\`sh
+          sh -c "\$(wget -qO- https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/router-agent/install.sh)"
+          \`\`\`
+          EOF
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/OAFPulse-TrollStore.tipa dist/OAFPulse-unsigned.ipa --clobber
+          else
+            gh release create "$TAG" dist/OAFPulse-TrollStore.tipa dist/OAFPulse-unsigned.ipa \
+              --target "$GITHUB_SHA" \
+              --title "OAF Pulse $TAG" \
+              --notes-file dist/release-notes.md
+          fi
